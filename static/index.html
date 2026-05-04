@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Research Assistant Editor</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="editor-pane">
+        <div class="toolbar">
+          <div>
+            <h1>Research Assistant</h1>
+            <p id="saveStatus">Saved</p>
+          </div>
+          <button id="selectionButton" type="button" title="선택한 문장으로 검색">Selection</button>
+        </div>
+        <textarea
+          id="editor"
+          spellcheck="false"
+          placeholder="글을 작성하면 최근 문단을 바탕으로 관련 자료를 자동으로 찾습니다."
+        ></textarea>
+      </section>
+
+      <aside class="research-pane">
+        <div class="panel-header">
+          <div>
+            <h2>Research</h2>
+            <p id="researchStatus">Waiting for text</p>
+          </div>
+          <button id="refreshButton" type="button" title="현재 문단으로 다시 검색">Refresh</button>
+        </div>
+        <div id="keywords" class="keywords"></div>
+        <div id="results" class="results empty">검색 결과가 여기에 표시됩니다.</div>
+      </aside>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
