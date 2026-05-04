@@ -51,6 +51,16 @@ export OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 LLM plan/summary 결과는 기본 1시간 동안 메모리 캐시에 저장됩니다. 같은 입력의 키워드 추출이나 같은 source 요약은 반복 호출하지 않습니다.
 
+LangSmith tracing을 켜려면 아래 환경변수를 설정합니다.
+
+```bash
+export LANGSMITH_TRACING=true
+export LANGSMITH_API_KEY=...
+export LANGSMITH_PROJECT=info-agent
+```
+
+tracing이 켜지면 LangGraph workflow, spaCy 추출, 검색, 요약, LLM plan 단계가 LangSmith에 중첩 span으로 기록됩니다.
+
 API 응답에는 `keyword_origin`, `search_origin`, `summary_origin`과 결과별 `result_origin`, `summary_origin`, `summary_provider`가 포함됩니다.
 
 Web Search API:

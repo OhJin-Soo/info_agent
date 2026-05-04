@@ -4,12 +4,15 @@ import os
 import re
 from functools import lru_cache
 
+from langsmith import traceable
+
 from info_agent.llm import validate_keywords
 
 
 NOUN_POS = {"NOUN", "PROPN"}
 
 
+@traceable(run_type="tool", name="spaCy Noun Extraction")
 def extract_noun_candidates(text: str, limit: int = 24) -> list[str]:
     """Extract noun-like candidates with spaCy, then keep keyword-safe terms."""
     nlp = load_spacy_pipeline()

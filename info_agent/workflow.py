@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from langsmith import traceable
 from langgraph.graph import END, StateGraph
 
 from info_agent.llm import build_queries, validate_keywords
@@ -37,6 +38,7 @@ class ResearchState(TypedDict, total=False):
     payload: dict[str, Any]
 
 
+@traceable(run_type="chain", name="Research Workflow")
 def run_research_workflow(pipeline: ResearchPipeline, context: str) -> dict[str, Any]:
     graph = build_research_graph(pipeline)
     state = graph.invoke({"context": context})
@@ -60,10 +62,12 @@ def build_research_graph(pipeline: ResearchPipeline):
     return graph.compile()
 
 
+@traceable(run_type="tool", name="Extract Nouns")
 def extract_nouns_node(state: ResearchState) -> ResearchState:
     return {"noun_candidates": extract_noun_candidates(state["context"])}
 
 
+@traceable(run_type="llm", name="Select Terms")
 def select_terms_node(pipeline: ResearchPipeline, state: ResearchState) -> ResearchState:
     context = state["context"]
     noun_candidates = state.get("noun_candidates", [])
@@ -80,6 +84,7 @@ def select_terms_node(pipeline: ResearchPipeline, state: ResearchState) -> Resea
     }
 
 
+@traceable(run_type="tool", name="Search Sources")
 def search_node(pipeline: ResearchPipeline, state: ResearchState) -> ResearchState:
     results: list[ResearchResult] = []
     for keyword in state.get("search_keywords", []):
@@ -111,12 +116,14 @@ def search_node(pipeline: ResearchPipeline, state: ResearchState) -> ResearchSta
     return {"raw_results": results, "selected_results": selected}
 
 
+@traceable(run_type="llm", name="Summarize Sources")
 def summarize_node(pipeline: ResearchPipeline, state: ResearchState) -> ResearchState:
     summarized = pipeline.summarize_results(state["context"], state.get("selected_results", []))
     public_results = [public_result(result) for result in summarized]
     return {"summarized_results": summarized, "public_results": public_results}
 
 
+@traceable(run_type="chain", name="Format Payload")
 def format_payload_node(state: ResearchState) -> ResearchState:
     raw_results = state.get("raw_results", [])
     summarized = state.get("summarized_results", [])

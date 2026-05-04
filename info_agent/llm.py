@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any, Protocol
 
+from langsmith import traceable
+
 
 STOPWORDS = {
     "about",
@@ -80,6 +82,7 @@ class LLMClient(Protocol):
 class DeterministicLLM:
     provider = "deterministic"
 
+    @traceable(run_type="chain", name="Deterministic Research Plan")
     def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         keywords = validate_keywords(noun_candidates or extract_keywords(text))
         return ResearchPlan(
@@ -109,6 +112,7 @@ class OpenAIResponsesLLM:
         self.timeout = timeout
         self.reasoning_effort = reasoning_effort
 
+    @traceable(run_type="llm", name="OpenAI Research Plan")
     def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         schema = {
             "type": "object",
@@ -146,6 +150,7 @@ class OpenAIResponsesLLM:
             queries = build_queries(keywords, text)
         return ResearchPlan(keywords=keywords or candidates or validate_keywords(extract_keywords(text)), queries=queries, provider=self.provider)
 
+    @traceable(run_type="llm", name="OpenAI Summary")
     def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
         schema = {
             "type": "object",
@@ -200,6 +205,7 @@ class OllamaLLM:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
+    @traceable(run_type="llm", name="Ollama Research Plan")
     def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         candidates = validate_keywords(noun_candidates or [])
         prompt = (
@@ -220,6 +226,7 @@ class OllamaLLM:
             provider=self.provider,
         )
 
+    @traceable(run_type="llm", name="Ollama Summary")
     def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
         prompt = summary_prompt(user_text, title, source_text)
         return summarize(self._generate(prompt), max_chars=420)
@@ -254,6 +261,7 @@ class ResilientLLM:
         self.last_plan_provider = self.fallback.provider if primary is None else primary.provider
         self.last_summary_provider = self.last_plan_provider
 
+    @traceable(run_type="chain", name="Resilient Research Plan")
     def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         candidates = validate_keywords(noun_candidates or [])
         cache_key = make_cache_key("plan", text, json.dumps(candidates, ensure_ascii=False))
@@ -281,6 +289,7 @@ class ResilientLLM:
             self._set_plan_cache(cache_key, cached_plan)
             return cached_plan
 
+    @traceable(run_type="chain", name="Resilient Summary")
     def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
         cache_key = make_cache_key("summary", user_text[:1200], title, source_text[:2400])
         cached = self._get_summary_cache(cache_key)

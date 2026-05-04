@@ -10,6 +10,8 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from langsmith import traceable
+
 from info_agent.llm import LLMClient, build_queries, create_llm_from_env, extract_keywords, summarize, validate_keywords
 
 
@@ -58,6 +60,7 @@ def extract_context(text: str, max_chars: int = 1200) -> str:
 class WikipediaSearch:
     endpoint = "https://en.wikipedia.org/w/api.php"
 
+    @traceable(run_type="tool", name="Wikipedia Search")
     def search(self, query: str, limit: int = 3, timeout: float = 2.5) -> list[ResearchResult]:
         params = urllib.parse.urlencode(
             {
@@ -120,6 +123,7 @@ class TavilySearch:
     def available(self) -> bool:
         return bool(self.api_key)
 
+    @traceable(run_type="tool", name="Tavily Search")
     def search(self, query: str, limit: int = 3, timeout: float = 5.0) -> list[ResearchResult]:
         if not self.api_key:
             return []
@@ -200,6 +204,7 @@ class ResearchPipeline:
         self.wikipedia = WikipediaSearch()
         self.tavily = TavilySearch()
 
+    @traceable(run_type="chain", name="Research Pipeline")
     def research(self, text: str) -> dict[str, Any]:
         context = extract_context(text)
         cache_key = re.sub(r"\s+", " ", context).strip().lower()
