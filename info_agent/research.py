@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from info_agent.llm import LLMClient, build_queries, create_llm_from_env, extract_keywords, summarize, validate_keywords
+from info_agent.nlp import extract_noun_candidates
 
 
 @dataclass(frozen=True)
@@ -207,7 +208,8 @@ class ResearchPipeline:
         if cached is not None:
             return cached
 
-        plan = self.llm.create_research_plan(context)
+        noun_candidates = extract_noun_candidates(context)
+        plan = self.llm.create_research_plan(context, noun_candidates)
         keywords = validate_keywords(plan.keywords)
         queries = plan.queries or build_queries(keywords, context)
         results: list[ResearchResult] = []
@@ -244,6 +246,7 @@ class ResearchPipeline:
 
         payload = {
             "keywords": keywords,
+            "noun_candidates": noun_candidates,
             "queries": queries,
             "search_keywords": search_keywords,
             "search_query": search_query,
@@ -251,7 +254,7 @@ class ResearchPipeline:
             "keyword_origin": response_origin(plan.provider),
             "search_origin": "search_api" if any(result.result_origin == "search_api" for result in results) else "fallback_link",
             "summary_origin": combined_summary_origin(summarized_results),
-            "pipeline": ["text", "llm_keyword_query_extraction", "search_api", "llm_summary"],
+            "pipeline": ["text", "spacy_noun_extraction", "llm_term_selection", "search_api", "llm_summary"],
             "results": public_results,
             "keyword_results": group_public_results_by_keyword_and_source(public_results, search_keywords),
         }

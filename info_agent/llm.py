@@ -70,7 +70,7 @@ class ResearchPlan:
 class LLMClient(Protocol):
     provider: str
 
-    def create_research_plan(self, text: str) -> ResearchPlan:
+    def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         raise NotImplementedError
 
     def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
@@ -80,8 +80,8 @@ class LLMClient(Protocol):
 class DeterministicLLM:
     provider = "deterministic"
 
-    def create_research_plan(self, text: str) -> ResearchPlan:
-        keywords = validate_keywords(extract_keywords(text))
+    def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
+        keywords = validate_keywords(noun_candidates or extract_keywords(text))
         return ResearchPlan(
             keywords=keywords,
             queries=build_queries(keywords, text),
@@ -109,7 +109,7 @@ class OpenAIResponsesLLM:
         self.timeout = timeout
         self.reasoning_effort = reasoning_effort
 
-    def create_research_plan(self, text: str) -> ResearchPlan:
+    def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         schema = {
             "type": "object",
             "additionalProperties": False,
@@ -129,7 +129,8 @@ class OpenAIResponsesLLM:
             },
             "required": ["keywords", "queries"],
         }
-        prompt = research_plan_prompt(text)
+        candidates = validate_keywords(noun_candidates or [])
+        prompt = research_plan_prompt(text, candidates)
         payload = self._request_json(
             instructions=(
                 "You are a research planning assistant. Return only schema-valid JSON. "
@@ -139,11 +140,11 @@ class OpenAIResponsesLLM:
             schema_name="research_plan",
             schema=schema,
         )
-        keywords = validate_keywords(clean_string_list(payload.get("keywords"), limit=12))
+        keywords = validate_candidate_keywords(clean_string_list(payload.get("keywords"), limit=12), candidates)
         queries = clean_string_list(payload.get("queries"), limit=4)
         if not queries:
             queries = build_queries(keywords, text)
-        return ResearchPlan(keywords=keywords or validate_keywords(extract_keywords(text)), queries=queries, provider=self.provider)
+        return ResearchPlan(keywords=keywords or candidates or validate_keywords(extract_keywords(text)), queries=queries, provider=self.provider)
 
     def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
         schema = {
@@ -206,20 +207,22 @@ class OllamaLLM:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
 
-    def create_research_plan(self, text: str) -> ResearchPlan:
+    def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
+        candidates = validate_keywords(noun_candidates or [])
         prompt = (
             "Return JSON with keys keywords and queries. keywords is up to 6 strings and must contain "
             "domain-specific terms only: named products, named concepts, acronyms, standards, technical terms, "
             "or multi-word terms. Exclude ordinary verbs and generic nouns such as remembers, preferences, "
             "insights, creates, system, tool, workflow, data, or solution unless part of a named technical term. "
+            "Choose keywords only from the noun_candidates list. "
             "queries is up to 4 search queries. No markdown.\n\n"
-            f"Draft:\n{text}"
+            f"noun_candidates:\n{json.dumps(candidates, ensure_ascii=False)}\n\nDraft:\n{text}"
         )
         payload = parse_json_object(self._generate(prompt))
-        keywords = validate_keywords(clean_string_list(payload.get("keywords"), limit=12))
+        keywords = validate_candidate_keywords(clean_string_list(payload.get("keywords"), limit=12), candidates)
         queries = clean_string_list(payload.get("queries"), limit=4)
         return ResearchPlan(
-            keywords=keywords or validate_keywords(extract_keywords(text)),
+            keywords=keywords or candidates or validate_keywords(extract_keywords(text)),
             queries=queries or build_queries(keywords, text),
             provider=self.provider,
         )
@@ -262,27 +265,28 @@ class ResilientLLM:
         self.last_plan_provider = self.fallback.provider if primary is None else primary.provider
         self.last_summary_provider = self.last_plan_provider
 
-    def create_research_plan(self, text: str) -> ResearchPlan:
-        cache_key = make_cache_key("plan", text)
+    def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
+        candidates = validate_keywords(noun_candidates or [])
+        cache_key = make_cache_key("plan", text, json.dumps(candidates, ensure_ascii=False))
         cached = self._get_plan_cache(cache_key)
         if cached is not None:
             self.last_plan_provider = cached.provider
             return cached
 
         if self.primary is None or self._primary_failed:
-            plan = self.fallback.create_research_plan(text)
+            plan = self.fallback.create_research_plan(text, candidates)
             self.last_plan_provider = self.fallback.provider if self.primary is None else f"{self.primary.provider}:fallback"
             cached_plan = ResearchPlan(plan.keywords, plan.queries, self.last_plan_provider)
             self._set_plan_cache(cache_key, cached_plan)
             return cached_plan
         try:
-            plan = self.primary.create_research_plan(text)
+            plan = self.primary.create_research_plan(text, candidates)
             self.last_plan_provider = self.primary.provider
             self._set_plan_cache(cache_key, plan)
             return plan
         except (urllib.error.URLError, TimeoutError, socket.timeout, json.JSONDecodeError, ValueError):
             self._primary_failed = True
-            plan = self.fallback.create_research_plan(text)
+            plan = self.fallback.create_research_plan(text, candidates)
             self.last_plan_provider = f"{self.primary.provider}:fallback"
             cached_plan = ResearchPlan(plan.keywords, plan.queries, self.last_plan_provider)
             self._set_plan_cache(cache_key, cached_plan)
@@ -459,7 +463,9 @@ def validate_keywords(keywords: list[str], limit: int = 6) -> list[str]:
 
 
 def normalize_keyword(keyword: str) -> str:
-    return re.sub(r"\s+", " ", str(keyword)).strip().strip("\"'`.,;:!?()[]{}")
+    normalized = re.sub(r"\s+", " ", str(keyword)).strip().strip("\"'`.,;:!?()[]{}")
+    parts = [normalize_token(part) if re.fullmatch(r"[가-힣]+", part) else part for part in normalized.split()]
+    return " ".join(parts)
 
 
 def is_valid_keyword(keyword: str) -> bool:
@@ -516,13 +522,29 @@ def normalize_cache_text(text: str) -> str:
     return re.sub(r"\s+", " ", str(text)).strip()
 
 
-def research_plan_prompt(text: str) -> str:
+def research_plan_prompt(text: str, noun_candidates: list[str] | None = None) -> str:
+    candidates = validate_keywords(noun_candidates or [])
     return (
-        "Extract concise research keywords and search queries from the user's draft. "
+        "Select concise research keywords from spaCy-extracted noun candidates, then create search queries. "
         "Keywords must be domain-specific terms only, not ordinary verbs, adjectives, or generic nouns. "
         "Prefer named products, named concepts, acronyms, standards, technical terms, and multi-word terms. "
         "Do not include generic words like remembers, preferences, insights, creates, system, tool, workflow, data, or solution unless they are part of a named technical term. "
         "Do not include full sentences or search-style questions as keywords. "
+        "Choose keywords only from noun_candidates; do not invent new keywords outside that list. "
         "Return keywords in the draft language when useful, but make at least one query strong for English web/Wikipedia search.\n\n"
+        f"noun_candidates:\n{json.dumps(candidates, ensure_ascii=False)}\n\n"
         f"Draft:\n{text}"
     )
+
+
+def validate_candidate_keywords(keywords: list[str], candidates: list[str], limit: int = 6) -> list[str]:
+    valid_keywords = validate_keywords(keywords, limit=limit)
+    if not candidates:
+        return valid_keywords
+    candidate_map = {keyword_dedupe_key(candidate): candidate for candidate in validate_keywords(candidates, limit=100)}
+    selected: list[str] = []
+    for keyword in valid_keywords:
+        candidate = candidate_map.get(keyword_dedupe_key(keyword))
+        if candidate and candidate not in selected:
+            selected.append(candidate)
+    return selected[:limit]

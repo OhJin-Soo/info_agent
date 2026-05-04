@@ -5,8 +5,10 @@ from info_agent.llm import (
     build_queries,
     extract_keywords,
     research_plan_prompt,
+    validate_candidate_keywords,
     validate_keywords,
 )
+from info_agent.nlp import extract_noun_candidates
 from info_agent.research import (
     ResearchPipeline,
     ResearchResult,
@@ -58,17 +60,35 @@ def test_validate_keywords_dedupes_case_only_differences() -> None:
 
 
 def test_openai_prompt_constrains_keywords_to_domain_terms() -> None:
-    prompt = research_plan_prompt("TDX remembers preferences and insights.")
+    prompt = research_plan_prompt("TDX remembers preferences and insights.", ["TDX", "preferences"])
 
     assert "domain-specific terms only" in prompt
     assert "not ordinary verbs" in prompt
     assert "remembers, preferences, insights, creates" in prompt
+    assert "Choose keywords only from noun_candidates" in prompt
+    assert '"TDX"' in prompt
 
 
 def test_validate_keywords_keeps_format_safety_not_semantic_filtering() -> None:
     keywords = validate_keywords(["TDX", "Cross-Session", "preferences"])
 
     assert keywords == ["TDX", "Cross-Session", "preferences"]
+
+
+def test_validate_candidate_keywords_limits_llm_to_spacy_candidates() -> None:
+    keywords = validate_candidate_keywords(
+        ["RAG", "invented term", "벡터 검색"],
+        ["RAG", "벡터 검색"],
+    )
+
+    assert keywords == ["RAG", "벡터 검색"]
+
+
+def test_extract_noun_candidates_uses_spacy_pipeline() -> None:
+    candidates = extract_noun_candidates("RAG uses vector search and embedding retrieval.")
+
+    assert "RAG" in candidates
+    assert any(candidate in candidates for candidate in ["vector", "embedding", "retrieval"])
 
 
 def test_keyword_search_query_uses_keywords_not_queries() -> None:
@@ -139,8 +159,9 @@ def test_select_keyword_channel_results_keeps_each_keyword_channel_pair() -> Non
 class FakeLLM:
     provider = "fake"
 
-    def create_research_plan(self, text: str) -> ResearchPlan:
+    def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         assert "RAG" in text
+        assert noun_candidates is not None
         return ResearchPlan(
             keywords=["RAG", "vector search", "RAG 어떻게 벡터 검색을 활용하나"],
             queries=["Retrieval augmented generation"],
@@ -177,7 +198,7 @@ def test_pipeline_uses_llm_for_plan_and_summary() -> None:
     assert payload["keyword_origin"] == "llm"
     assert payload["search_origin"] == "search_api"
     assert payload["summary_origin"] == "llm"
-    assert payload["pipeline"] == ["text", "llm_keyword_query_extraction", "search_api", "llm_summary"]
+    assert payload["pipeline"] == ["text", "spacy_noun_extraction", "llm_term_selection", "search_api", "llm_summary"]
     result = next(item for item in payload["results"] if item["url"] == "https://example.com/rag")
     assert result["summary"].startswith("summary for Retrieval-augmented")
     assert result["full_summary"].startswith("summary for Retrieval-augmented")
@@ -205,7 +226,7 @@ class BrokenLLM:
     def __init__(self) -> None:
         self.calls = 0
 
-    def create_research_plan(self, text: str) -> ResearchPlan:
+    def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         self.calls += 1
         raise TimeoutError("unavailable")
 
@@ -233,7 +254,7 @@ class CountingLLM:
         self.plan_calls = 0
         self.summary_calls = 0
 
-    def create_research_plan(self, text: str) -> ResearchPlan:
+    def create_research_plan(self, text: str, noun_candidates: list[str] | None = None) -> ResearchPlan:
         self.plan_calls += 1
         return ResearchPlan(["RAG"], ["RAG"], self.provider)
 

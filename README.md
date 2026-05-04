@@ -19,6 +19,12 @@
 
 ## LLM 설정
 
+키워드 후보는 spaCy로 명사 후보를 먼저 추출하고, LLM은 그 후보 중 domain term만 선택합니다. 기본값은 설치된 spaCy 모델을 자동 탐색하고, 없으면 blank tokenizer fallback을 사용합니다.
+
+```bash
+export SPACY_MODEL=en_core_web_sm
+```
+
 기본값은 API 키 없이 동작하는 deterministic fallback입니다. 실제 LLM을 쓰려면 아래 중 하나를 설정합니다.
 
 OpenAI Responses API:
@@ -40,7 +46,7 @@ export OLLAMA_MODEL=llama3.1
 export OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
 
-파이프라인은 `텍스트 → LLM 키워드/쿼리 추출 → Search API 호출 → LLM 요약` 순서로 실행됩니다. LLM 호출이 실패하면 deterministic fallback으로 응답을 유지합니다.
+파이프라인은 `텍스트 → spaCy 명사 후보 추출 → LLM 용어 선택 → Search API 호출 → LLM 요약` 순서로 실행됩니다. LLM 호출이 실패하면 deterministic fallback으로 응답을 유지합니다.
 
 LLM plan/summary 결과는 기본 1시간 동안 메모리 캐시에 저장됩니다. 같은 입력의 키워드 추출이나 같은 source 요약은 반복 호출하지 않습니다.
 
