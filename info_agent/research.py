@@ -10,7 +10,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from info_agent.llm import LLMClient, build_queries, create_llm_from_env, extract_keywords, summarize
+from info_agent.llm import LLMClient, build_queries, create_llm_from_env, extract_keywords, summarize, validate_keywords
 
 
 @dataclass(frozen=True)
@@ -26,6 +26,7 @@ class ResearchResult:
     result_origin: str = "search_api"
     summary_origin: str = "llm"
     summary_provider: str = ""
+    matched_keyword: str = ""
 
 
 class TTLCache:
@@ -104,6 +105,7 @@ class WikipediaSearch:
                     result_origin="search_api",
                     summary_origin="fallback",
                     summary_provider="deterministic",
+                    matched_keyword=query,
                 )
             )
         return results
@@ -167,6 +169,7 @@ class TavilySearch:
                     result_origin="search_api",
                     summary_origin="fallback",
                     summary_provider="deterministic",
+                    matched_keyword=query,
                 )
             )
         return results
@@ -186,6 +189,7 @@ def search_link_result(source: str, title: str, base_url: str, query: str) -> Re
         result_origin="fallback_link",
         summary_origin="fallback",
         summary_provider="deterministic",
+        matched_keyword=query,
     )
 
 
@@ -204,51 +208,52 @@ class ResearchPipeline:
             return cached
 
         plan = self.llm.create_research_plan(context)
-        keywords = plan.keywords
+        keywords = validate_keywords(plan.keywords)
         queries = plan.queries or build_queries(keywords, context)
         results: list[ResearchResult] = []
+        search_keywords = search_keywords_for(keywords, context)
+        search_query = " ".join(search_keywords)
 
-        wiki_queries = list(queries[:1])
-        if any(keyword.lower() == "rag" for keyword in keywords):
-            wiki_queries.append("Retrieval augmented generation")
+        for keyword in search_keywords:
+            results.extend(mark_keyword(self.wikipedia.search(keyword, limit=2), keyword))
 
-        for query in wiki_queries:
-            results.extend(self.wikipedia.search(query))
-
-        primary_query = queries[0] if queries else context
-        if primary_query:
-            web_results = self.tavily.search(primary_query)
+            web_results = mark_keyword(self.tavily.search(keyword, limit=2), keyword)
             if web_results:
                 results.extend(web_results)
             else:
                 results.append(
                     search_link_result(
                         "web",
-                        f"Web search: {primary_query}",
+                        f"Web search: {keyword}",
                         "https://duckduckgo.com/?q={query}",
-                        primary_query,
+                        keyword,
                     )
                 )
             results.append(
                 search_link_result(
                     "youtube",
-                    f"YouTube search: {primary_query}",
+                    f"YouTube search: {keyword}",
                     "https://www.youtube.com/results?search_query={query}",
-                    primary_query,
+                    keyword,
                 )
             )
 
-        summarized_results = self.summarize_results(context, dedupe_results(results)[:8])
+        selected_results = select_keyword_channel_results(dedupe_results(results), search_keywords)
+        summarized_results = self.summarize_results(context, selected_results)
+        public_results = [public_result(result) for result in summarized_results]
 
         payload = {
             "keywords": keywords,
             "queries": queries,
+            "search_keywords": search_keywords,
+            "search_query": search_query,
             "llm_provider": plan.provider,
             "keyword_origin": response_origin(plan.provider),
             "search_origin": "search_api" if any(result.result_origin == "search_api" for result in results) else "fallback_link",
             "summary_origin": combined_summary_origin(summarized_results),
             "pipeline": ["text", "llm_keyword_query_extraction", "search_api", "llm_summary"],
-            "results": [public_result(result) for result in summarized_results],
+            "results": public_results,
+            "keyword_results": group_public_results_by_keyword_and_source(public_results, search_keywords),
         }
         self.cache.set(cache_key, payload)
         return payload
@@ -280,6 +285,7 @@ class ResearchPipeline:
                     result_origin=result.result_origin,
                     summary_origin=response_origin(summary_provider),
                     summary_provider=summary_provider,
+                    matched_keyword=result.matched_keyword,
                 )
             )
         return summarized
@@ -297,6 +303,99 @@ def dedupe_results(results: list[ResearchResult]) -> list[ResearchResult]:
     return deduped
 
 
+def select_balanced_results(results: list[ResearchResult], limit: int = 8) -> list[ResearchResult]:
+    per_source_limit = {"web": 3, "wikipedia": 3, "youtube": 2}
+    selected: list[ResearchResult] = []
+    selected_urls: set[str] = set()
+
+    for source in ("web", "wikipedia", "youtube"):
+        source_results = [result for result in results if result.source == source]
+        for result in source_results[: per_source_limit[source]]:
+            selected.append(result)
+            selected_urls.add(result.url.lower().rstrip("/"))
+
+    if len(selected) < limit:
+        for result in results:
+            key = result.url.lower().rstrip("/")
+            if key in selected_urls:
+                continue
+            selected.append(result)
+            selected_urls.add(key)
+            if len(selected) >= limit:
+                break
+
+    return selected[:limit]
+
+
+def select_keyword_covered_results(
+    results: list[ResearchResult], keywords: list[str], limit: int = 8
+) -> list[ResearchResult]:
+    selected: list[ResearchResult] = []
+    selected_urls: set[str] = set()
+
+    for keyword in keywords:
+        match = next((result for result in results if result.matched_keyword == keyword), None)
+        if match is None:
+            continue
+        selected.append(match)
+        selected_urls.add(match.url.lower().rstrip("/"))
+
+    for result in select_balanced_results(results, limit=limit):
+        key = result.url.lower().rstrip("/")
+        if key in selected_urls:
+            continue
+        selected.append(result)
+        selected_urls.add(key)
+        if len(selected) >= limit:
+            break
+
+    return selected[:limit]
+
+
+def select_keyword_channel_results(results: list[ResearchResult], keywords: list[str]) -> list[ResearchResult]:
+    selected: list[ResearchResult] = []
+    selected_urls: set[str] = set()
+    for keyword in keywords:
+        for source in ("web", "wikipedia", "youtube"):
+            match = next(
+                (result for result in results if result.matched_keyword == keyword and result.source == source),
+                None,
+            )
+            if match is None:
+                continue
+            key = match.url.lower().rstrip("/")
+            if key in selected_urls:
+                continue
+            selected.append(match)
+            selected_urls.add(key)
+    return selected
+
+
+def mark_keyword(results: list[ResearchResult], keyword: str) -> list[ResearchResult]:
+    marked: list[ResearchResult] = []
+    for result in results:
+        if result.matched_keyword:
+            marked.append(result)
+            continue
+        marked.append(
+            ResearchResult(
+                source=result.source,
+                channel=result.channel,
+                title=result.title,
+                url=result.url,
+                summary=result.summary,
+                confidence=result.confidence,
+                raw_content=result.raw_content,
+                full_summary=result.full_summary,
+                result_origin=result.result_origin,
+                summary_origin=result.summary_origin,
+                summary_provider=result.summary_provider,
+                matched_keyword=keyword,
+            )
+        )
+    return marked
+
+
 def public_result(result: ResearchResult) -> dict[str, Any]:
     return {
         "source": result.source,
@@ -311,7 +410,25 @@ def public_result(result: ResearchResult) -> dict[str, Any]:
         "result_origin": result.result_origin,
         "summary_origin": result.summary_origin,
         "summary_provider": result.summary_provider,
+        "matched_keyword": result.matched_keyword,
     }
+
+
+def group_public_results_by_keyword_and_source(
+    results: list[dict[str, Any]], keywords: list[str]
+) -> list[dict[str, Any]]:
+    grouped: list[dict[str, Any]] = []
+    for keyword in keywords:
+        keyword_results = [result for result in results if result.get("matched_keyword") == keyword]
+        grouped.append(
+            {
+                "keyword": keyword,
+                "web": [result for result in keyword_results if result.get("source") == "web"],
+                "wikipedia": [result for result in keyword_results if result.get("source") == "wikipedia"],
+                "youtube": [result for result in keyword_results if result.get("source") == "youtube"],
+            }
+        )
+    return grouped
 
 
 def response_origin(provider: str) -> str:
@@ -331,6 +448,18 @@ def combined_summary_origin(results: list[ResearchResult]) -> str:
 
 def tavily_api_key_from_env() -> str | None:
     return os.getenv("TAVILY_API_KEY")
+
+
+def keyword_search_query(keywords: list[str], fallback_text: str, limit: int = 4) -> str:
+    valid_keywords = search_keywords_for(keywords, fallback_text, limit=limit)
+    return " ".join(valid_keywords)
+
+
+def search_keywords_for(keywords: list[str], fallback_text: str, limit: int = 6) -> list[str]:
+    valid_keywords = validate_keywords(keywords, limit=limit)
+    if valid_keywords:
+        return valid_keywords
+    return re.findall(r"[A-Za-z0-9가-힣.+#-]+", fallback_text)[:limit]
 
 
 def channel_for_source(source: str) -> str:

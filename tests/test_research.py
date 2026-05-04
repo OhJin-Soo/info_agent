@@ -1,5 +1,22 @@
-from info_agent.llm import DeterministicLLM, ResearchPlan, ResilientLLM, build_queries, extract_keywords
-from info_agent.research import ResearchPipeline, ResearchResult, TavilySearch, dedupe_results
+from info_agent.llm import (
+    DeterministicLLM,
+    ResearchPlan,
+    ResilientLLM,
+    build_queries,
+    extract_keywords,
+    research_plan_prompt,
+    validate_keywords,
+)
+from info_agent.research import (
+    ResearchPipeline,
+    ResearchResult,
+    TavilySearch,
+    dedupe_results,
+    keyword_search_query,
+    select_balanced_results,
+    select_keyword_channel_results,
+    select_keyword_covered_results,
+)
 
 
 def test_extract_keywords_prioritizes_acronyms_and_terms() -> None:
@@ -20,6 +37,44 @@ def test_build_queries_returns_deterministic_variants() -> None:
     ]
 
 
+def test_validate_keywords_rejects_sentence_like_items() -> None:
+    keywords = validate_keywords(
+        [
+            "RAG",
+            "벡터 검색",
+            "RAG 어떻게 벡터 검색을 활용하나",
+            "Amazon Bedrock AgentCore Memory, short-term memory",
+            "external memory layer for conversational agents storing summaries",
+        ]
+    )
+
+    assert keywords == ["RAG", "벡터 검색"]
+
+
+def test_validate_keywords_dedupes_case_only_differences() -> None:
+    keywords = validate_keywords(["Cross-Session Memory", "cross-session memory", "RAG"])
+
+    assert keywords == ["Cross-Session Memory", "RAG"]
+
+
+def test_openai_prompt_constrains_keywords_to_domain_terms() -> None:
+    prompt = research_plan_prompt("TDX remembers preferences and insights.")
+
+    assert "domain-specific terms only" in prompt
+    assert "not ordinary verbs" in prompt
+    assert "remembers, preferences, insights, creates" in prompt
+
+
+def test_validate_keywords_keeps_format_safety_not_semantic_filtering() -> None:
+    keywords = validate_keywords(["TDX", "Cross-Session", "preferences"])
+
+    assert keywords == ["TDX", "Cross-Session", "preferences"]
+
+
+def test_keyword_search_query_uses_keywords_not_queries() -> None:
+    assert keyword_search_query(["RAG", "벡터 검색", "외부 지식"], "fallback") == "RAG 벡터 검색 외부 지식"
+
+
 def test_dedupe_results_keeps_highest_confidence_first() -> None:
     results = dedupe_results(
         [
@@ -32,13 +87,62 @@ def test_dedupe_results_keeps_highest_confidence_first() -> None:
     assert [result.title for result in results] == ["high", "other"]
 
 
+def test_select_balanced_results_keeps_each_channel_visible() -> None:
+    results = [
+        ResearchResult("web", "Web", f"web {index}", f"https://example.com/web/{index}", "...", 0.9)
+        for index in range(6)
+    ] + [
+        ResearchResult("wikipedia", "Wikipedia", "wiki", "https://example.com/wiki", "...", 0.78),
+        ResearchResult("youtube", "YouTube", "video", "https://example.com/video", "...", 0.45),
+    ]
+
+    selected = select_balanced_results(results, limit=5)
+
+    assert [result.source for result in selected].count("web") == 3
+    assert any(result.source == "wikipedia" for result in selected)
+    assert any(result.source == "youtube" for result in selected)
+
+
+def test_select_keyword_covered_results_keeps_each_keyword_visible() -> None:
+    results = [
+        ResearchResult("web", "Web", "a", "https://example.com/a", "...", 0.9, matched_keyword="alpha"),
+        ResearchResult("web", "Web", "b", "https://example.com/b", "...", 0.9, matched_keyword="beta"),
+        ResearchResult("web", "Web", "c", "https://example.com/c", "...", 0.9, matched_keyword="gamma"),
+        ResearchResult("wikipedia", "Wikipedia", "extra", "https://example.com/x", "...", 0.8, matched_keyword="alpha"),
+    ]
+
+    selected = select_keyword_covered_results(results, ["alpha", "beta", "gamma"], limit=3)
+
+    assert {result.matched_keyword for result in selected} == {"alpha", "beta", "gamma"}
+
+
+def test_select_keyword_channel_results_keeps_each_keyword_channel_pair() -> None:
+    results = [
+        ResearchResult(source, source.title(), f"{keyword}-{source}", f"https://example.com/{keyword}/{source}", "...", 0.8, matched_keyword=keyword)
+        for keyword in ("alpha", "beta")
+        for source in ("web", "wikipedia", "youtube")
+    ]
+
+    selected = select_keyword_channel_results(results, ["alpha", "beta"])
+
+    assert len(selected) == 6
+    assert {(result.matched_keyword, result.source) for result in selected} == {
+        ("alpha", "web"),
+        ("alpha", "wikipedia"),
+        ("alpha", "youtube"),
+        ("beta", "web"),
+        ("beta", "wikipedia"),
+        ("beta", "youtube"),
+    }
+
+
 class FakeLLM:
     provider = "fake"
 
     def create_research_plan(self, text: str) -> ResearchPlan:
         assert "RAG" in text
         return ResearchPlan(
-            keywords=["RAG", "vector search"],
+            keywords=["RAG", "vector search", "RAG 어떻게 벡터 검색을 활용하나"],
             queries=["Retrieval augmented generation"],
             provider=self.provider,
         )
@@ -50,7 +154,7 @@ class FakeLLM:
 
 def test_pipeline_uses_llm_for_plan_and_summary() -> None:
     pipeline = ResearchPipeline(llm=FakeLLM())
-    pipeline.wikipedia.search = lambda query: [
+    pipeline.wikipedia.search = lambda query, limit=2: [
         ResearchResult(
             source="wikipedia",
             channel="Wikipedia",
@@ -61,11 +165,14 @@ def test_pipeline_uses_llm_for_plan_and_summary() -> None:
             raw_content="RAG retrieves external knowledge before generation.",
         )
     ]
+    pipeline.tavily.search = lambda query, limit=2: []
 
     payload = pipeline.research("RAG는 벡터 검색을 활용한다.")
 
     assert payload["keywords"] == ["RAG", "vector search"]
     assert payload["queries"] == ["Retrieval augmented generation"]
+    assert payload["search_query"] == "RAG vector search"
+    assert payload["search_keywords"] == ["RAG", "vector search"]
     assert payload["llm_provider"] == "fake"
     assert payload["keyword_origin"] == "llm"
     assert payload["search_origin"] == "search_api"
@@ -78,6 +185,7 @@ def test_pipeline_uses_llm_for_plan_and_summary() -> None:
     assert result["result_origin"] == "search_api"
     assert result["channel"] == "Wikipedia"
     assert result["provider_label"] == "Wikipedia API"
+    assert result["matched_keyword"] == "RAG"
     assert result["summary_origin"] == "llm"
     assert result["summary_provider"] == "fake"
     assert "raw_content" not in result
@@ -128,7 +236,7 @@ def test_tavily_search_uses_tavily_api_key_env(monkeypatch) -> None:
 
 def test_public_result_preserves_full_summary() -> None:
     pipeline = ResearchPipeline(llm=FakeLLM())
-    pipeline.wikipedia.search = lambda query: [
+    pipeline.wikipedia.search = lambda query, limit=2: [
         ResearchResult(
             source="wikipedia",
             channel="Wikipedia",
@@ -139,6 +247,7 @@ def test_public_result_preserves_full_summary() -> None:
             raw_content="x" * 600,
         )
     ]
+    pipeline.tavily.search = lambda query, limit=2: []
 
     payload = pipeline.research("RAG는 벡터 검색을 활용한다.")
     result = next(item for item in payload["results"] if item["url"] == "https://example.com/long")
@@ -146,3 +255,30 @@ def test_public_result_preserves_full_summary() -> None:
     assert result["full_summary"].startswith("summary for Long result")
     assert len(result["summary"]) <= len(result["full_summary"])
     assert "full_summary" in result
+
+
+def test_pipeline_searches_each_keyword_per_channel() -> None:
+    pipeline = ResearchPipeline(llm=FakeLLM())
+    wiki_calls: list[str] = []
+    tavily_calls: list[str] = []
+
+    def fake_wikipedia_search(query: str, limit: int = 2) -> list[ResearchResult]:
+        wiki_calls.append(query)
+        return []
+
+    def fake_tavily_search(query: str, limit: int = 2) -> list[ResearchResult]:
+        tavily_calls.append(query)
+        return []
+
+    pipeline.wikipedia.search = fake_wikipedia_search
+    pipeline.tavily.search = fake_tavily_search
+
+    payload = pipeline.research("RAG는 벡터 검색을 활용한다.")
+
+    assert payload["search_keywords"] == ["RAG", "vector search"]
+    assert wiki_calls == ["RAG", "vector search"]
+    assert tavily_calls == ["RAG", "vector search"]
+    assert any(result["channel"] == "Web" for result in payload["results"])
+    assert any(result["channel"] == "YouTube" for result in payload["results"])
+    assert {result["matched_keyword"] for result in payload["results"]} == {"RAG", "vector search"}
+    assert all(set(group.keys()) == {"keyword", "web", "wikipedia", "youtube"} for group in payload["keyword_results"])

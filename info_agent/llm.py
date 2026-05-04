@@ -54,6 +54,8 @@ STOPWORDS = {
 }
 
 KOREAN_SUFFIXES = ("으로", "에서", "에게", "에는", "을", "를", "은", "는", "이", "가", "와", "과", "도")
+KEYWORD_MAX_CHARS = 60
+KEYWORD_MAX_TERMS = 5
 
 
 @dataclass(frozen=True)
@@ -77,7 +79,7 @@ class DeterministicLLM:
     provider = "deterministic"
 
     def create_research_plan(self, text: str) -> ResearchPlan:
-        keywords = extract_keywords(text)
+        keywords = validate_keywords(extract_keywords(text))
         return ResearchPlan(
             keywords=keywords,
             queries=build_queries(keywords, text),
@@ -125,23 +127,21 @@ class OpenAIResponsesLLM:
             },
             "required": ["keywords", "queries"],
         }
-        prompt = (
-            "Extract concise research keywords and search queries from the user's draft. "
-            "Return keywords in the draft language when useful, but make at least one query "
-            "strong for English web/Wikipedia search.\n\n"
-            f"Draft:\n{text}"
-        )
+        prompt = research_plan_prompt(text)
         payload = self._request_json(
-            instructions="You are a research planning assistant. Return only schema-valid JSON.",
+            instructions=(
+                "You are a research planning assistant. Return only schema-valid JSON. "
+                "The keywords array is a controlled vocabulary of searchable domain terms, not a list of common words."
+            ),
             input_text=prompt,
             schema_name="research_plan",
             schema=schema,
         )
-        keywords = clean_string_list(payload.get("keywords"), limit=6)
+        keywords = validate_keywords(clean_string_list(payload.get("keywords"), limit=12))
         queries = clean_string_list(payload.get("queries"), limit=4)
         if not queries:
             queries = build_queries(keywords, text)
-        return ResearchPlan(keywords=keywords or extract_keywords(text), queries=queries, provider=self.provider)
+        return ResearchPlan(keywords=keywords or validate_keywords(extract_keywords(text)), queries=queries, provider=self.provider)
 
     def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
         schema = {
@@ -206,15 +206,18 @@ class OllamaLLM:
 
     def create_research_plan(self, text: str) -> ResearchPlan:
         prompt = (
-            "Return JSON with keys keywords and queries. keywords is up to 6 strings. "
+            "Return JSON with keys keywords and queries. keywords is up to 6 strings and must contain "
+            "domain-specific terms only: named products, named concepts, acronyms, standards, technical terms, "
+            "or multi-word terms. Exclude ordinary verbs and generic nouns such as remembers, preferences, "
+            "insights, creates, system, tool, workflow, data, or solution unless part of a named technical term. "
             "queries is up to 4 search queries. No markdown.\n\n"
             f"Draft:\n{text}"
         )
         payload = parse_json_object(self._generate(prompt))
-        keywords = clean_string_list(payload.get("keywords"), limit=6)
+        keywords = validate_keywords(clean_string_list(payload.get("keywords"), limit=12))
         queries = clean_string_list(payload.get("queries"), limit=4)
         return ResearchPlan(
-            keywords=keywords or extract_keywords(text),
+            keywords=keywords or validate_keywords(extract_keywords(text)),
             queries=queries or build_queries(keywords, text),
             provider=self.provider,
         )
@@ -328,7 +331,7 @@ def extract_keywords(text: str, limit: int = 6) -> list[str]:
         first_seen.setdefault(normalized, index)
 
     ranked = sorted(scores, key=lambda item: (-scores[item], first_seen[item], item.lower()))
-    return ranked[:limit]
+    return validate_keywords(ranked, limit=limit)
 
 
 def normalize_token(token: str) -> str:
@@ -380,6 +383,48 @@ def clean_string_list(value: Any, limit: int) -> list[str]:
     return cleaned[:limit]
 
 
+def validate_keywords(keywords: list[str], limit: int = 6) -> list[str]:
+    valid: list[str] = []
+    seen: set[str] = set()
+    for keyword in keywords:
+        normalized = normalize_keyword(keyword)
+        if not is_valid_keyword(normalized):
+            continue
+        dedupe_key = keyword_dedupe_key(normalized)
+        if dedupe_key not in seen:
+            valid.append(normalized)
+            seen.add(dedupe_key)
+        if len(valid) >= limit:
+            break
+    return valid
+
+
+def normalize_keyword(keyword: str) -> str:
+    return re.sub(r"\s+", " ", str(keyword)).strip().strip("\"'`.,;:!?()[]{}")
+
+
+def is_valid_keyword(keyword: str) -> bool:
+    if len(keyword) < 2 or len(keyword) > KEYWORD_MAX_CHARS:
+        return False
+    if re.search(r"[,;:!?\"'`“”‘’()\[\]{}<>|/\\]", keyword):
+        return False
+    parts = keyword.split()
+    if len(parts) > KEYWORD_MAX_TERMS:
+        return False
+    if not all(re.fullmatch(r"[A-Za-z0-9가-힣.+#-]+", part) for part in parts):
+        return False
+    lowered = keyword.lower()
+    if lowered in STOPWORDS:
+        return False
+    if re.search(r"(어떻게|방법|설명|비교|사례|튜토리얼|what|how|why|compare|tutorial|explained)", lowered):
+        return False
+    return True
+
+
+def keyword_dedupe_key(keyword: str) -> str:
+    return re.sub(r"\s+", " ", keyword).strip().casefold()
+
+
 def extract_response_text(payload: dict[str, Any]) -> str:
     if isinstance(payload.get("output_text"), str):
         return payload["output_text"]
@@ -401,3 +446,15 @@ def parse_json_object(text: str) -> dict[str, Any]:
             return {}
         payload = json.loads(match.group(0))
     return payload if isinstance(payload, dict) else {}
+
+
+def research_plan_prompt(text: str) -> str:
+    return (
+        "Extract concise research keywords and search queries from the user's draft. "
+        "Keywords must be domain-specific terms only, not ordinary verbs, adjectives, or generic nouns. "
+        "Prefer named products, named concepts, acronyms, standards, technical terms, and multi-word terms. "
+        "Do not include generic words like remembers, preferences, insights, creates, system, tool, workflow, data, or solution unless they are part of a named technical term. "
+        "Do not include full sentences or search-style questions as keywords. "
+        "Return keywords in the draft language when useful, but make at least one query strong for English web/Wikipedia search.\n\n"
+        f"Draft:\n{text}"
+    )
