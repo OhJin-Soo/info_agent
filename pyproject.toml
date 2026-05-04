@@ -1,7 +1,18 @@
 [project]
 name = "info-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "LLM-style research assistant text editor MVP"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
