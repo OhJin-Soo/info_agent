@@ -93,17 +93,24 @@ function renderResearch(payload) {
   for (const item of items) {
     const card = document.createElement("article");
     card.className = "result-card";
+    const resultLabel = originLabel(item.result_origin);
+    const summaryLabel = originLabel(item.summary_origin);
     card.innerHTML = `
+      <div class="badges">
+        <span class="badge ${badgeClass(item.result_origin)}">Result: ${escapeHtml(resultLabel)}</span>
+        <span class="badge ${badgeClass(item.summary_origin)}">Summary: ${escapeHtml(summaryLabel)}</span>
+      </div>
       <a href="${escapeAttr(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a>
       <p>${escapeHtml(item.summary || "")}</p>
       <div class="meta">
         <span>${escapeHtml(item.source)}</span>
-        <span>${Math.round((item.confidence || 0) * 100)}%</span>
+        <span>${escapeHtml(item.summary_provider || "")} · ${Math.round((item.confidence || 0) * 100)}%</span>
       </div>
     `;
     results.appendChild(card);
   }
-  researchStatus.textContent = `${items.length} results`;
+  const provider = payload.llm_provider ? ` · keywords ${originLabel(payload.keyword_origin)} · summary ${originLabel(payload.summary_origin)}` : "";
+  researchStatus.textContent = `${items.length} results${provider}`;
 }
 
 function renderEmpty(message) {
@@ -120,6 +127,27 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#096;");
+}
+
+function originLabel(origin) {
+  return {
+    llm: "LLM",
+    search_api: "Search API",
+    fallback: "Fallback",
+    fallback_link: "Fallback link",
+    mixed: "Mixed",
+    none: "None",
+  }[origin] || "Unknown";
+}
+
+function badgeClass(origin) {
+  return {
+    llm: "badge-llm",
+    search_api: "badge-search",
+    fallback: "badge-fallback",
+    fallback_link: "badge-fallback",
+    mixed: "badge-mixed",
+  }[origin] || "badge-fallback";
 }
 
 editor.addEventListener("input", scheduleResearch);
