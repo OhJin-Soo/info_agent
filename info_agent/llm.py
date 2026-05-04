@@ -153,14 +153,7 @@ class OpenAIResponsesLLM:
             "properties": {"summary": {"type": "string"}},
             "required": ["summary"],
         }
-        prompt = (
-            "Summarize the source for a writer who is drafting the text below. "
-            "Keep it factual, cite no claims that are absent from the source, and write in Korean "
-            "when the draft is Korean.\n\n"
-            f"Draft:\n{user_text[:1200]}\n\n"
-            f"Source title:\n{title}\n\n"
-            f"Source text:\n{source_text[:2400]}"
-        )
+        prompt = summary_prompt(user_text, title, source_text)
         payload = self._request_json(
             instructions="You summarize retrieved research sources for a text editor.",
             input_text=prompt,
@@ -228,11 +221,7 @@ class OllamaLLM:
         )
 
     def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
-        prompt = (
-            "Summarize this source for the user's draft in 2 concise Korean sentences. "
-            "Use only the source text. No markdown.\n\n"
-            f"Draft:\n{user_text[:1200]}\n\nTitle:\n{title}\n\nSource:\n{source_text[:2400]}"
-        )
+        prompt = summary_prompt(user_text, title, source_text)
         return summarize(self._generate(prompt), max_chars=420)
 
     def _generate(self, prompt: str) -> str:
@@ -534,6 +523,18 @@ def research_plan_prompt(text: str, noun_candidates: list[str] | None = None) ->
         "Return keywords in the draft language when useful, but make at least one query strong for English web/Wikipedia search.\n\n"
         f"noun_candidates:\n{json.dumps(candidates, ensure_ascii=False)}\n\n"
         f"Draft:\n{text}"
+    )
+
+
+def summary_prompt(user_text: str, title: str, source_text: str) -> str:
+    return (
+        "Summarize the source for the user's draft in Korean only. "
+        "The output must be entirely in Korean; do not include English sentences except for unavoidable proper nouns or product names. "
+        "Write 2 concise sentences. Use only the source text. No markdown. "
+        "Do not translate the prompt itself, only output the summary in Korean.\n\n"
+        f"Draft:\n{user_text[:1200]}\n\n"
+        f"Title:\n{title}\n\n"
+        f"Source:\n{source_text[:2400]}"
     )
 
 

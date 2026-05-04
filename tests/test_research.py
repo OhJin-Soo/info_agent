@@ -5,6 +5,7 @@ from info_agent.llm import (
     build_queries,
     extract_keywords,
     research_plan_prompt,
+    summary_prompt,
     validate_candidate_keywords,
     validate_keywords,
 )
@@ -67,6 +68,14 @@ def test_openai_prompt_constrains_keywords_to_domain_terms() -> None:
     assert "remembers, preferences, insights, creates" in prompt
     assert "Choose keywords only from noun_candidates" in prompt
     assert '"TDX"' in prompt
+
+
+def test_summary_prompt_forces_korean_only_output() -> None:
+    prompt = summary_prompt("draft", "Title", "Source text")
+
+    assert "Korean only" in prompt
+    assert "The output must be entirely in Korean" in prompt
+    assert "Do not translate the prompt itself" in prompt
 
 
 def test_validate_keywords_keeps_format_safety_not_semantic_filtering() -> None:
