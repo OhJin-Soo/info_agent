@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import urllib.error
@@ -9,62 +10,25 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from langsmith import traceable
 
-STOPWORDS = {
-    "about",
-    "after",
-    "also",
-    "and",
-    "are",
-    "because",
-    "between",
-    "but",
-    "can",
-    "for",
-    "from",
-    "has",
-    "have",
-    "into",
-    "is",
-    "it",
-    "its",
-    "of",
-    "on",
-    "or",
-    "that",
-    "the",
-    "this",
-    "to",
-    "use",
-    "uses",
-    "using",
-    "with",
-    "사용",
-    "활용",
-    "그리고",
-    "또는",
-    "관련",
-    "대한",
-    "검색",
-    "사용",
-    "외부",
-    "지식",
-    "활용",
-    "활용하여",
-    "한다",
-    "한다는",
-}
-
-KOREAN_SUFFIXES = ("으로", "에서", "에게", "에는", "을", "를", "은", "는", "이", "가", "와", "과", "도")
+from info_agent.llm import LLMClient, build_queries, create_llm_from_env, extract_keywords, summarize, validate_keywords
 
 
 @dataclass(frozen=True)
 class ResearchResult:
     source: str
+    channel: str
     title: str
     url: str
     summary: str
     confidence: float
+    raw_content: str = ""
+    full_summary: str = ""
+    result_origin: str = "search_api"
+    summary_origin: str = "llm"
+    summary_provider: str = ""
+    matched_keyword: str = ""
 
 
 class TTLCache:
@@ -93,74 +57,11 @@ def extract_context(text: str, max_chars: int = 1200) -> str:
     return "\n".join(paragraphs[-3:])[-max_chars:]
 
 
-def extract_keywords(text: str, limit: int = 6) -> list[str]:
-    tokens = re.findall(r"[A-Za-z][A-Za-z0-9+-]{1,}|[가-힣]{2,}", text)
-    scores: dict[str, int] = {}
-    first_seen: dict[str, int] = {}
-
-    for index, token in enumerate(tokens):
-        normalized = normalize_token(token)
-        key = normalized.lower()
-        if key in STOPWORDS or len(key) < 2:
-            continue
-
-        score = 1
-        if normalized.isupper() and len(normalized) > 1:
-            score += 3
-        if any(char.isdigit() for char in normalized):
-            score += 1
-        if len(normalized) >= 7:
-            score += 1
-
-        scores[normalized] = scores.get(normalized, 0) + score
-        first_seen.setdefault(normalized, index)
-
-    ranked = sorted(scores, key=lambda item: (-scores[item], first_seen[item], item.lower()))
-    return ranked[:limit]
-
-
-def normalize_token(token: str) -> str:
-    normalized = token.strip()
-    if re.fullmatch(r"[가-힣]+", normalized):
-        for suffix in KOREAN_SUFFIXES:
-            if normalized.endswith(suffix) and len(normalized) > len(suffix) + 1:
-                return normalized[: -len(suffix)]
-    return normalized
-
-
-def build_queries(keywords: list[str], text: str, limit: int = 4) -> list[str]:
-    if not keywords:
-        fallback = " ".join(re.findall(r"\S+", text)[:8])
-        return [fallback] if fallback else []
-
-    primary = " ".join(keywords[:3])
-    queries = [
-        primary,
-        f"{primary} explained",
-        f"{primary} tutorial",
-    ]
-    if len(keywords) >= 2:
-        queries.append(f"{keywords[0]} {keywords[1]} case study")
-
-    deduped: list[str] = []
-    for query in queries:
-        if query and query not in deduped:
-            deduped.append(query)
-    return deduped[:limit]
-
-
-def summarize(text: str, max_chars: int = 260) -> str:
-    clean = re.sub(r"\s+", " ", text).strip()
-    if len(clean) <= max_chars:
-        return clean
-    trimmed = clean[: max_chars - 1].rsplit(" ", 1)[0]
-    return f"{trimmed}..."
-
-
 class WikipediaSearch:
     endpoint = "https://en.wikipedia.org/w/api.php"
 
-    def search(self, query: str, limit: int = 3, timeout: float = 4.0) -> list[ResearchResult]:
+    @traceable(run_type="tool", name="Wikipedia Search")
+    def search(self, query: str, limit: int = 3, timeout: float = 2.5) -> list[ResearchResult]:
         params = urllib.parse.urlencode(
             {
                 "action": "query",
@@ -197,10 +98,82 @@ class WikipediaSearch:
             results.append(
                 ResearchResult(
                     source="wikipedia",
+                    channel="Wikipedia",
                     title=title,
                     url=url,
                     summary=summarize(extract or f"Wikipedia article related to {query}."),
                     confidence=0.78,
+                    raw_content=extract,
+                    full_summary=extract or f"Wikipedia article related to {query}.",
+                    result_origin="search_api",
+                    summary_origin="fallback",
+                    summary_provider="deterministic",
+                    matched_keyword=query,
+                )
+            )
+        return results
+
+
+class TavilySearch:
+    endpoint = "https://api.tavily.com/search"
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = api_key or tavily_api_key_from_env()
+
+    def available(self) -> bool:
+        return bool(self.api_key)
+
+    @traceable(run_type="tool", name="Tavily Search")
+    def search(self, query: str, limit: int = 3, timeout: float = 5.0) -> list[ResearchResult]:
+        if not self.api_key:
+            return []
+
+        body = {
+            "query": query,
+            "search_depth": os.getenv("TAVILY_SEARCH_DEPTH", "basic"),
+            "max_results": limit,
+            "include_answer": False,
+            "include_raw_content": False,
+        }
+        request = urllib.request.Request(
+            self.endpoint,
+            data=json.dumps(body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+            return []
+
+        results: list[ResearchResult] = []
+        for item in payload.get("results", []):
+            title = item.get("title")
+            url = item.get("url")
+            content = item.get("content", "")
+            if not title or not url:
+                continue
+            score = item.get("score")
+            confidence = float(score) if isinstance(score, int | float) else 0.7
+            results.append(
+                ResearchResult(
+                    source="web",
+                    channel="Web",
+                    title=title,
+                    url=url,
+                    summary=summarize(content or f"Tavily search result related to {query}."),
+                    confidence=max(0.0, min(confidence, 1.0)),
+                    raw_content=content,
+                    full_summary=content or f"Tavily search result related to {query}.",
+                    result_origin="search_api",
+                    summary_origin="fallback",
+                    summary_provider="deterministic",
+                    matched_keyword=query,
                 )
             )
         return results
@@ -210,18 +183,28 @@ def search_link_result(source: str, title: str, base_url: str, query: str) -> Re
     encoded = urllib.parse.quote_plus(query)
     return ResearchResult(
         source=source,
+        channel=channel_for_source(source),
         title=title,
         url=base_url.format(query=encoded),
         summary=f"Search results for '{query}'. Open the link to review current source material.",
         confidence=0.45,
+        raw_content=f"{title}\nSearch query: {query}",
+        full_summary=f"Search results for '{query}'. Open the link to review current source material.",
+        result_origin="fallback_link",
+        summary_origin="fallback",
+        summary_provider="deterministic",
+        matched_keyword=query,
     )
 
 
 class ResearchPipeline:
-    def __init__(self, cache: TTLCache | None = None) -> None:
+    def __init__(self, cache: TTLCache | None = None, llm: LLMClient | None = None) -> None:
         self.cache = cache or TTLCache()
+        self.llm = llm or create_llm_from_env()
         self.wikipedia = WikipediaSearch()
+        self.tavily = TavilySearch()
 
+    @traceable(run_type="chain", name="Research Pipeline")
     def research(self, text: str) -> dict[str, Any]:
         context = extract_context(text)
         cache_key = re.sub(r"\s+", " ", context).strip().lower()
@@ -229,43 +212,43 @@ class ResearchPipeline:
         if cached is not None:
             return cached
 
-        keywords = extract_keywords(context)
-        queries = build_queries(keywords, context)
-        results: list[ResearchResult] = []
+        from info_agent.workflow import run_research_workflow
 
-        wiki_queries = list(queries[:2])
-        if any(keyword.lower() == "rag" for keyword in keywords):
-            wiki_queries.append("Retrieval augmented generation")
-
-        for query in wiki_queries:
-            results.extend(self.wikipedia.search(query))
-
-        primary_query = queries[0] if queries else context
-        if primary_query:
-            results.append(
-                search_link_result(
-                    "web",
-                    f"Web search: {primary_query}",
-                    "https://duckduckgo.com/?q={query}",
-                    primary_query,
-                )
-            )
-            results.append(
-                search_link_result(
-                    "youtube",
-                    f"YouTube search: {primary_query}",
-                    "https://www.youtube.com/results?search_query={query}",
-                    primary_query,
-                )
-            )
-
-        payload = {
-            "keywords": keywords,
-            "queries": queries,
-            "results": [result.__dict__ for result in dedupe_results(results)[:8]],
-        }
+        payload = run_research_workflow(self, context)
         self.cache.set(cache_key, payload)
         return payload
+
+    def summarize_results(self, context: str, results: list[ResearchResult]) -> list[ResearchResult]:
+        summarized: list[ResearchResult] = []
+        for result in results:
+            source_text = result.raw_content or result.summary
+            if result.source in {"wikipedia", "web", "youtube"}:
+                summary = self.llm.summarize_result(
+                    user_text=context,
+                    title=result.title,
+                    source_text=source_text,
+                )
+                summary_provider = getattr(self.llm, "last_summary_provider", getattr(self.llm, "provider", "unknown"))
+            else:
+                summary = result.full_summary or result.summary
+                summary_provider = result.summary_provider or "deterministic"
+            summarized.append(
+                ResearchResult(
+                    source=result.source,
+                    channel=result.channel,
+                    title=result.title,
+                    url=result.url,
+                    summary=summarize(summary),
+                    confidence=result.confidence,
+                    raw_content=result.raw_content,
+                    full_summary=summary,
+                    result_origin=result.result_origin,
+                    summary_origin=response_origin(summary_provider),
+                    summary_provider=summary_provider,
+                    matched_keyword=result.matched_keyword,
+                )
+            )
+        return summarized
 
 
 def dedupe_results(results: list[ResearchResult]) -> list[ResearchResult]:
@@ -278,3 +261,182 @@ def dedupe_results(results: list[ResearchResult]) -> list[ResearchResult]:
         seen.add(key)
         deduped.append(result)
     return deduped
+
+
+def select_balanced_results(results: list[ResearchResult], limit: int = 8) -> list[ResearchResult]:
+    per_source_limit = {"web": 3, "wikipedia": 3, "youtube": 2}
+    selected: list[ResearchResult] = []
+    selected_urls: set[str] = set()
+
+    for source in ("web", "wikipedia", "youtube"):
+        source_results = [result for result in results if result.source == source]
+        for result in source_results[: per_source_limit[source]]:
+            selected.append(result)
+            selected_urls.add(result.url.lower().rstrip("/"))
+
+    if len(selected) < limit:
+        for result in results:
+            key = result.url.lower().rstrip("/")
+            if key in selected_urls:
+                continue
+            selected.append(result)
+            selected_urls.add(key)
+            if len(selected) >= limit:
+                break
+
+    return selected[:limit]
+
+
+def select_keyword_covered_results(
+    results: list[ResearchResult], keywords: list[str], limit: int = 8
+) -> list[ResearchResult]:
+    selected: list[ResearchResult] = []
+    selected_urls: set[str] = set()
+
+    for keyword in keywords:
+        match = next((result for result in results if result.matched_keyword == keyword), None)
+        if match is None:
+            continue
+        selected.append(match)
+        selected_urls.add(match.url.lower().rstrip("/"))
+
+    for result in select_balanced_results(results, limit=limit):
+        key = result.url.lower().rstrip("/")
+        if key in selected_urls:
+            continue
+        selected.append(result)
+        selected_urls.add(key)
+        if len(selected) >= limit:
+            break
+
+    return selected[:limit]
+
+
+def select_keyword_channel_results(results: list[ResearchResult], keywords: list[str]) -> list[ResearchResult]:
+    selected: list[ResearchResult] = []
+    selected_urls: set[str] = set()
+    for keyword in keywords:
+        for source in ("web", "wikipedia", "youtube"):
+            match = next(
+                (result for result in results if result.matched_keyword == keyword and result.source == source),
+                None,
+            )
+            if match is None:
+                continue
+            key = match.url.lower().rstrip("/")
+            if key in selected_urls:
+                continue
+            selected.append(match)
+            selected_urls.add(key)
+    return selected
+
+
+def mark_keyword(results: list[ResearchResult], keyword: str) -> list[ResearchResult]:
+    marked: list[ResearchResult] = []
+    for result in results:
+        if result.matched_keyword:
+            marked.append(result)
+            continue
+        marked.append(
+            ResearchResult(
+                source=result.source,
+                channel=result.channel,
+                title=result.title,
+                url=result.url,
+                summary=result.summary,
+                confidence=result.confidence,
+                raw_content=result.raw_content,
+                full_summary=result.full_summary,
+                result_origin=result.result_origin,
+                summary_origin=result.summary_origin,
+                summary_provider=result.summary_provider,
+                matched_keyword=keyword,
+            )
+        )
+    return marked
+
+
+def public_result(result: ResearchResult) -> dict[str, Any]:
+    return {
+        "source": result.source,
+        "channel": result.channel,
+        "provider_label": provider_label(result),
+        "title": result.title,
+        "url": result.url,
+        "summary": result.summary,
+        "full_summary": result.full_summary or result.summary,
+        "is_truncated": (result.full_summary or result.summary) != result.summary,
+        "confidence": result.confidence,
+        "result_origin": result.result_origin,
+        "summary_origin": result.summary_origin,
+        "summary_provider": result.summary_provider,
+        "matched_keyword": result.matched_keyword,
+    }
+
+
+def group_public_results_by_keyword_and_source(
+    results: list[dict[str, Any]], keywords: list[str]
+) -> list[dict[str, Any]]:
+    grouped: list[dict[str, Any]] = []
+    for keyword in keywords:
+        keyword_results = [result for result in results if result.get("matched_keyword") == keyword]
+        grouped.append(
+            {
+                "keyword": keyword,
+                "web": [result for result in keyword_results if result.get("source") == "web"],
+                "wikipedia": [result for result in keyword_results if result.get("source") == "wikipedia"],
+                "youtube": [result for result in keyword_results if result.get("source") == "youtube"],
+            }
+        )
+    return grouped
+
+
+def response_origin(provider: str) -> str:
+    if provider in {"", "deterministic"} or provider.endswith(":fallback"):
+        return "fallback"
+    return "llm"
+
+
+def combined_summary_origin(results: list[ResearchResult]) -> str:
+    origins = {result.summary_origin for result in results}
+    if not origins:
+        return "none"
+    if len(origins) == 1:
+        return origins.pop()
+    return "mixed"
+
+
+def tavily_api_key_from_env() -> str | None:
+    return os.getenv("TAVILY_API_KEY")
+
+
+def keyword_search_query(keywords: list[str], fallback_text: str, limit: int = 4) -> str:
+    valid_keywords = search_keywords_for(keywords, fallback_text, limit=limit)
+    return " ".join(valid_keywords)
+
+
+def search_keywords_for(keywords: list[str], fallback_text: str, limit: int = 6) -> list[str]:
+    valid_keywords = validate_keywords(keywords, limit=limit)
+    if valid_keywords:
+        return valid_keywords
+    return re.findall(r"[A-Za-z0-9가-힣.+#-]+", fallback_text)[:limit]
+
+
+def channel_for_source(source: str) -> str:
+    return {
+        "web": "Web",
+        "wikipedia": "Wikipedia",
+        "youtube": "YouTube",
+    }.get(source, source.title())
+
+
+def provider_label(result: ResearchResult) -> str:
+    if result.source == "web" and result.result_origin == "search_api":
+        return "Tavily API"
+    if result.source == "wikipedia" and result.result_origin == "search_api":
+        return "Wikipedia API"
+    if result.source == "youtube" and result.result_origin == "fallback_link":
+        return "YouTube fallback link"
+    if result.result_origin == "fallback_link":
+        return "Fallback link"
+    return "Search API"

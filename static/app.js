@@ -90,20 +90,91 @@ function renderResearch(payload) {
 
   results.className = "results";
   results.innerHTML = "";
-  for (const item of items) {
-    const card = document.createElement("article");
-    card.className = "result-card";
-    card.innerHTML = `
+  const keywordGroups = payload.keyword_results || legacyKeywordGroups(items, payload.search_keywords || payload.keywords || []);
+  for (const group of keywordGroups) {
+    const section = document.createElement("section");
+    section.className = "keyword-section";
+    section.innerHTML = `<h3>${escapeHtml(group.keyword)}</h3>`;
+    for (const source of ["web", "wikipedia", "youtube"]) {
+      const sourceBlock = document.createElement("div");
+      sourceBlock.className = "source-block";
+      sourceBlock.innerHTML = `<h4>${escapeHtml(sourceLabel(source))}</h4>`;
+      const sourceItems = group[source] || [];
+      if (!sourceItems.length) {
+        const empty = document.createElement("p");
+        empty.className = "keyword-empty";
+        empty.textContent = `${sourceLabel(source)} 검색 결과가 없습니다.`;
+        sourceBlock.appendChild(empty);
+      }
+      for (const item of sourceItems) {
+        sourceBlock.appendChild(createResultCard(item));
+      }
+      section.appendChild(sourceBlock);
+    }
+    results.appendChild(section);
+  }
+  const provider = payload.llm_provider ? ` · keywords ${originLabel(payload.keyword_origin)} · summary ${originLabel(payload.summary_origin)}` : "";
+  researchStatus.textContent = `${items.length} results${provider}`;
+}
+
+function createResultCard(item) {
+  const card = document.createElement("article");
+  card.className = "result-card";
+  const resultLabel = originLabel(item.result_origin);
+  const summaryLabel = originLabel(item.summary_origin);
+  const fullSummary = item.full_summary || item.summary || "";
+  const preview = item.summary || fullSummary;
+  const needsMore = item.is_truncated && fullSummary !== preview;
+  card.innerHTML = `
+      <div class="badges">
+        <span class="badge badge-channel">${escapeHtml(item.channel || item.source)}</span>
+        <span class="badge ${badgeClass(item.result_origin)}">${escapeHtml(item.provider_label || resultLabel)}</span>
+        <span class="badge badge-keyword">Keyword: ${escapeHtml(item.matched_keyword || "-")}</span>
+        <span class="badge ${badgeClass(item.summary_origin)}">Summary: ${escapeHtml(summaryLabel)}</span>
+      </div>
       <a href="${escapeAttr(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a>
-      <p>${escapeHtml(item.summary || "")}</p>
+      <p class="summary-text" data-preview="${escapeAttr(preview)}" data-full="${escapeAttr(fullSummary)}">${escapeHtml(preview)}</p>
+      ${
+        needsMore
+          ? '<button class="more-button" type="button" aria-expanded="false">더보기</button>'
+          : ""
+      }
       <div class="meta">
         <span>${escapeHtml(item.source)}</span>
-        <span>${Math.round((item.confidence || 0) * 100)}%</span>
+        <span>${escapeHtml(item.summary_provider || "")} · ${Math.round((item.confidence || 0) * 100)}%</span>
       </div>
     `;
-    results.appendChild(card);
+  const moreButton = card.querySelector(".more-button");
+  if (moreButton) {
+    moreButton.addEventListener("click", () => toggleSummary(card));
   }
-  researchStatus.textContent = `${items.length} results`;
+  return card;
+}
+
+function legacyKeywordGroups(items, searchKeywords) {
+  const grouped = new Map();
+  for (const item of items) {
+    const keyword = item.matched_keyword || "";
+    if (!grouped.has(keyword)) grouped.set(keyword, []);
+    grouped.get(keyword).push(item);
+  }
+  return searchKeywords.map((keyword) => {
+    const keywordItems = grouped.get(keyword) || [];
+    return {
+      keyword,
+      web: keywordItems.filter((item) => item.source === "web"),
+      wikipedia: keywordItems.filter((item) => item.source === "wikipedia"),
+      youtube: keywordItems.filter((item) => item.source === "youtube"),
+    };
+  });
+}
+
+function sourceLabel(source) {
+  return {
+    web: "Web",
+    wikipedia: "Wikipedia",
+    youtube: "YouTube",
+  }[source] || source;
 }
 
 function renderEmpty(message) {
@@ -120,6 +191,36 @@ function escapeHtml(value) {
 
 function escapeAttr(value) {
   return escapeHtml(value).replace(/`/g, "&#096;");
+}
+
+function originLabel(origin) {
+  return {
+    llm: "LLM",
+    search_api: "Search API",
+    fallback: "Fallback",
+    fallback_link: "Fallback link",
+    mixed: "Mixed",
+    none: "None",
+  }[origin] || "Unknown";
+}
+
+function badgeClass(origin) {
+  return {
+    llm: "badge-llm",
+    search_api: "badge-search",
+    fallback: "badge-fallback",
+    fallback_link: "badge-fallback",
+    mixed: "badge-mixed",
+  }[origin] || "badge-fallback";
+}
+
+function toggleSummary(card) {
+  const summary = card.querySelector(".summary-text");
+  const button = card.querySelector(".more-button");
+  const expanded = button.getAttribute("aria-expanded") === "true";
+  summary.textContent = expanded ? summary.dataset.preview : summary.dataset.full;
+  button.textContent = expanded ? "더보기" : "접기";
+  button.setAttribute("aria-expanded", String(!expanded));
 }
 
 editor.addEventListener("input", scheduleResearch);
