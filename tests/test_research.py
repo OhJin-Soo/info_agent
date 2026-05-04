@@ -226,6 +226,36 @@ def test_resilient_llm_disables_primary_after_failure() -> None:
     assert primary.calls == 1
 
 
+class CountingLLM:
+    provider = "counting"
+
+    def __init__(self) -> None:
+        self.plan_calls = 0
+        self.summary_calls = 0
+
+    def create_research_plan(self, text: str) -> ResearchPlan:
+        self.plan_calls += 1
+        return ResearchPlan(["RAG"], ["RAG"], self.provider)
+
+    def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
+        self.summary_calls += 1
+        return f"{title}: {source_text}"
+
+
+def test_resilient_llm_caches_plan_and_summary() -> None:
+    primary = CountingLLM()
+    llm = ResilientLLM(primary, cache_ttl_seconds=60)
+
+    assert llm.create_research_plan("RAG text").keywords == ["RAG"]
+    assert llm.create_research_plan("RAG   text").keywords == ["RAG"]
+    assert primary.plan_calls == 1
+
+    kwargs = {"user_text": "draft", "title": "Title", "source_text": "source"}
+    assert llm.summarize_result(**kwargs) == "Title: source"
+    assert llm.summarize_result(**kwargs) == "Title: source"
+    assert primary.summary_calls == 1
+
+
 def test_tavily_search_uses_tavily_api_key_env(monkeypatch) -> None:
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
 

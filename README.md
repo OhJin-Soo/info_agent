@@ -29,6 +29,7 @@ export OPENAI_API_KEY=...
 export OPENAI_MODEL=gpt-5-mini
 export OPENAI_REASONING_EFFORT=minimal
 export LLM_TIMEOUT_SECONDS=30
+export LLM_CACHE_TTL_SECONDS=3600
 ```
 
 Ollama:
@@ -40,6 +41,8 @@ export OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
 
 파이프라인은 `텍스트 → LLM 키워드/쿼리 추출 → Search API 호출 → LLM 요약` 순서로 실행됩니다. LLM 호출이 실패하면 deterministic fallback으로 응답을 유지합니다.
+
+LLM plan/summary 결과는 기본 1시간 동안 메모리 캐시에 저장됩니다. 같은 입력의 키워드 추출이나 같은 source 요약은 반복 호출하지 않습니다.
 
 API 응답에는 `keyword_origin`, `search_origin`, `summary_origin`과 결과별 `result_origin`, `summary_origin`, `summary_provider`가 포함됩니다.
 

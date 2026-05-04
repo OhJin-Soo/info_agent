@@ -4,9 +4,11 @@ import json
 import os
 import re
 import socket
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from hashlib import sha256
 from typing import Any, Protocol
 
 
@@ -244,41 +246,98 @@ class OllamaLLM:
 
 
 class ResilientLLM:
-    def __init__(self, primary: LLMClient | None, fallback: LLMClient | None = None) -> None:
+    def __init__(
+        self,
+        primary: LLMClient | None,
+        fallback: LLMClient | None = None,
+        cache_ttl_seconds: int | None = None,
+    ) -> None:
         self.primary = primary
         self.fallback = fallback or DeterministicLLM()
+        self.cache_ttl_seconds = cache_ttl_seconds or int(os.getenv("LLM_CACHE_TTL_SECONDS", "3600"))
+        self._plan_cache: dict[str, tuple[float, ResearchPlan]] = {}
+        self._summary_cache: dict[str, tuple[float, str, str]] = {}
         self._primary_failed = False
         self.provider = primary.provider if primary else self.fallback.provider
         self.last_plan_provider = self.fallback.provider if primary is None else primary.provider
         self.last_summary_provider = self.last_plan_provider
 
     def create_research_plan(self, text: str) -> ResearchPlan:
+        cache_key = make_cache_key("plan", text)
+        cached = self._get_plan_cache(cache_key)
+        if cached is not None:
+            self.last_plan_provider = cached.provider
+            return cached
+
         if self.primary is None or self._primary_failed:
             plan = self.fallback.create_research_plan(text)
             self.last_plan_provider = self.fallback.provider if self.primary is None else f"{self.primary.provider}:fallback"
-            return ResearchPlan(plan.keywords, plan.queries, self.last_plan_provider)
+            cached_plan = ResearchPlan(plan.keywords, plan.queries, self.last_plan_provider)
+            self._set_plan_cache(cache_key, cached_plan)
+            return cached_plan
         try:
             plan = self.primary.create_research_plan(text)
             self.last_plan_provider = self.primary.provider
+            self._set_plan_cache(cache_key, plan)
             return plan
         except (urllib.error.URLError, TimeoutError, socket.timeout, json.JSONDecodeError, ValueError):
             self._primary_failed = True
             plan = self.fallback.create_research_plan(text)
             self.last_plan_provider = f"{self.primary.provider}:fallback"
-            return ResearchPlan(plan.keywords, plan.queries, self.last_plan_provider)
+            cached_plan = ResearchPlan(plan.keywords, plan.queries, self.last_plan_provider)
+            self._set_plan_cache(cache_key, cached_plan)
+            return cached_plan
 
     def summarize_result(self, *, user_text: str, title: str, source_text: str) -> str:
+        cache_key = make_cache_key("summary", user_text[:1200], title, source_text[:2400])
+        cached = self._get_summary_cache(cache_key)
+        if cached is not None:
+            summary, provider = cached
+            self.last_summary_provider = provider
+            return summary
+
         if self.primary is None or self._primary_failed:
             self.last_summary_provider = self.fallback.provider if self.primary is None else f"{self.primary.provider}:fallback"
-            return self.fallback.summarize_result(user_text=user_text, title=title, source_text=source_text)
+            summary = self.fallback.summarize_result(user_text=user_text, title=title, source_text=source_text)
+            self._set_summary_cache(cache_key, summary, self.last_summary_provider)
+            return summary
         try:
             summary = self.primary.summarize_result(user_text=user_text, title=title, source_text=source_text)
             self.last_summary_provider = self.primary.provider
+            self._set_summary_cache(cache_key, summary, self.last_summary_provider)
             return summary
         except (urllib.error.URLError, TimeoutError, socket.timeout, json.JSONDecodeError, ValueError):
             self._primary_failed = True
             self.last_summary_provider = f"{self.primary.provider}:fallback"
-            return self.fallback.summarize_result(user_text=user_text, title=title, source_text=source_text)
+            summary = self.fallback.summarize_result(user_text=user_text, title=title, source_text=source_text)
+            self._set_summary_cache(cache_key, summary, self.last_summary_provider)
+            return summary
+
+    def _get_plan_cache(self, key: str) -> ResearchPlan | None:
+        item = self._plan_cache.get(key)
+        if item is None:
+            return None
+        created_at, plan = item
+        if time.time() - created_at > self.cache_ttl_seconds:
+            self._plan_cache.pop(key, None)
+            return None
+        return plan
+
+    def _set_plan_cache(self, key: str, plan: ResearchPlan) -> None:
+        self._plan_cache[key] = (time.time(), plan)
+
+    def _get_summary_cache(self, key: str) -> tuple[str, str] | None:
+        item = self._summary_cache.get(key)
+        if item is None:
+            return None
+        created_at, summary, provider = item
+        if time.time() - created_at > self.cache_ttl_seconds:
+            self._summary_cache.pop(key, None)
+            return None
+        return summary, provider
+
+    def _set_summary_cache(self, key: str, summary: str, provider: str) -> None:
+        self._summary_cache[key] = (time.time(), summary, provider)
 
 
 def create_llm_from_env() -> LLMClient:
@@ -446,6 +505,15 @@ def parse_json_object(text: str) -> dict[str, Any]:
             return {}
         payload = json.loads(match.group(0))
     return payload if isinstance(payload, dict) else {}
+
+
+def make_cache_key(*parts: str) -> str:
+    normalized = "\n\n".join(normalize_cache_text(part) for part in parts)
+    return sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def normalize_cache_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text)).strip()
 
 
 def research_plan_prompt(text: str) -> str:
