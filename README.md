@@ -14,6 +14,7 @@
 - Web/YouTube 검색 링크 fallback
 - LLM/Search API/fallback 응답 출처 표시
 - Web/Tavily, Wikipedia/Wikipedia API, YouTube/fallback link 채널 구분
+- LangGraph 기반 research workflow
 - `/research`, `/research/selection` API
 - query context 기반 TTL 캐싱
 
@@ -46,7 +47,7 @@ export OLLAMA_MODEL=llama3.1
 export OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
 
-파이프라인은 `텍스트 → spaCy 명사 후보 추출 → LLM 용어 선택 → Search API 호출 → LLM 요약` 순서로 실행됩니다. LLM 호출이 실패하면 deterministic fallback으로 응답을 유지합니다.
+파이프라인은 LangGraph workflow로 감싸져 있으며 `텍스트 → spaCy 명사 후보 추출 → LLM 용어 선택 → Search API 호출 → LLM 요약` 순서로 실행됩니다. LLM 호출이 실패하면 deterministic fallback으로 응답을 유지합니다.
 
 LLM plan/summary 결과는 기본 1시간 동안 메모리 캐시에 저장됩니다. 같은 입력의 키워드 추출이나 같은 source 요약은 반복 호출하지 않습니다.
 

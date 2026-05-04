@@ -198,6 +198,7 @@ def test_pipeline_uses_llm_for_plan_and_summary() -> None:
     assert payload["keyword_origin"] == "llm"
     assert payload["search_origin"] == "search_api"
     assert payload["summary_origin"] == "llm"
+    assert payload["workflow_engine"] == "langgraph"
     assert payload["pipeline"] == ["text", "spacy_noun_extraction", "llm_term_selection", "search_api", "llm_summary"]
     result = next(item for item in payload["results"] if item["url"] == "https://example.com/rag")
     assert result["summary"].startswith("summary for Retrieval-augmented")

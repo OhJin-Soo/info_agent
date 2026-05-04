@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Any
 
 from info_agent.llm import LLMClient, build_queries, create_llm_from_env, extract_keywords, summarize, validate_keywords
-from info_agent.nlp import extract_noun_candidates
 
 
 @dataclass(frozen=True)
@@ -208,56 +207,9 @@ class ResearchPipeline:
         if cached is not None:
             return cached
 
-        noun_candidates = extract_noun_candidates(context)
-        plan = self.llm.create_research_plan(context, noun_candidates)
-        keywords = validate_keywords(plan.keywords)
-        queries = plan.queries or build_queries(keywords, context)
-        results: list[ResearchResult] = []
-        search_keywords = search_keywords_for(keywords, context)
-        search_query = " ".join(search_keywords)
+        from info_agent.workflow import run_research_workflow
 
-        for keyword in search_keywords:
-            results.extend(mark_keyword(self.wikipedia.search(keyword, limit=2), keyword))
-
-            web_results = mark_keyword(self.tavily.search(keyword, limit=2), keyword)
-            if web_results:
-                results.extend(web_results)
-            else:
-                results.append(
-                    search_link_result(
-                        "web",
-                        f"Web search: {keyword}",
-                        "https://duckduckgo.com/?q={query}",
-                        keyword,
-                    )
-                )
-            results.append(
-                search_link_result(
-                    "youtube",
-                    f"YouTube search: {keyword}",
-                    "https://www.youtube.com/results?search_query={query}",
-                    keyword,
-                )
-            )
-
-        selected_results = select_keyword_channel_results(dedupe_results(results), search_keywords)
-        summarized_results = self.summarize_results(context, selected_results)
-        public_results = [public_result(result) for result in summarized_results]
-
-        payload = {
-            "keywords": keywords,
-            "noun_candidates": noun_candidates,
-            "queries": queries,
-            "search_keywords": search_keywords,
-            "search_query": search_query,
-            "llm_provider": plan.provider,
-            "keyword_origin": response_origin(plan.provider),
-            "search_origin": "search_api" if any(result.result_origin == "search_api" for result in results) else "fallback_link",
-            "summary_origin": combined_summary_origin(summarized_results),
-            "pipeline": ["text", "spacy_noun_extraction", "llm_term_selection", "search_api", "llm_summary"],
-            "results": public_results,
-            "keyword_results": group_public_results_by_keyword_and_source(public_results, search_keywords),
-        }
+        payload = run_research_workflow(self, context)
         self.cache.set(cache_key, payload)
         return payload
 
