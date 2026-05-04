@@ -16,11 +16,13 @@ from info_agent.llm import LLMClient, build_queries, create_llm_from_env, extrac
 @dataclass(frozen=True)
 class ResearchResult:
     source: str
+    channel: str
     title: str
     url: str
     summary: str
     confidence: float
     raw_content: str = ""
+    full_summary: str = ""
     result_origin: str = "search_api"
     summary_origin: str = "llm"
     summary_provider: str = ""
@@ -92,11 +94,13 @@ class WikipediaSearch:
             results.append(
                 ResearchResult(
                     source="wikipedia",
+                    channel="Wikipedia",
                     title=title,
                     url=url,
                     summary=summarize(extract or f"Wikipedia article related to {query}."),
                     confidence=0.78,
                     raw_content=extract,
+                    full_summary=extract or f"Wikipedia article related to {query}.",
                     result_origin="search_api",
                     summary_origin="fallback",
                     summary_provider="deterministic",
@@ -153,11 +157,13 @@ class TavilySearch:
             results.append(
                 ResearchResult(
                     source="web",
+                    channel="Web",
                     title=title,
                     url=url,
                     summary=summarize(content or f"Tavily search result related to {query}."),
                     confidence=max(0.0, min(confidence, 1.0)),
                     raw_content=content,
+                    full_summary=content or f"Tavily search result related to {query}.",
                     result_origin="search_api",
                     summary_origin="fallback",
                     summary_provider="deterministic",
@@ -170,11 +176,13 @@ def search_link_result(source: str, title: str, base_url: str, query: str) -> Re
     encoded = urllib.parse.quote_plus(query)
     return ResearchResult(
         source=source,
+        channel=channel_for_source(source),
         title=title,
         url=base_url.format(query=encoded),
         summary=f"Search results for '{query}'. Open the link to review current source material.",
         confidence=0.45,
         raw_content=f"{title}\nSearch query: {query}",
+        full_summary=f"Search results for '{query}'. Open the link to review current source material.",
         result_origin="fallback_link",
         summary_origin="fallback",
         summary_provider="deterministic",
@@ -257,16 +265,18 @@ class ResearchPipeline:
                 )
                 summary_provider = getattr(self.llm, "last_summary_provider", getattr(self.llm, "provider", "unknown"))
             else:
-                summary = result.summary
+                summary = result.full_summary or result.summary
                 summary_provider = result.summary_provider or "deterministic"
             summarized.append(
                 ResearchResult(
                     source=result.source,
+                    channel=result.channel,
                     title=result.title,
                     url=result.url,
-                    summary=summary,
+                    summary=summarize(summary),
                     confidence=result.confidence,
                     raw_content=result.raw_content,
+                    full_summary=summary,
                     result_origin=result.result_origin,
                     summary_origin=response_origin(summary_provider),
                     summary_provider=summary_provider,
@@ -290,9 +300,13 @@ def dedupe_results(results: list[ResearchResult]) -> list[ResearchResult]:
 def public_result(result: ResearchResult) -> dict[str, Any]:
     return {
         "source": result.source,
+        "channel": result.channel,
+        "provider_label": provider_label(result),
         "title": result.title,
         "url": result.url,
         "summary": result.summary,
+        "full_summary": result.full_summary or result.summary,
+        "is_truncated": (result.full_summary or result.summary) != result.summary,
         "confidence": result.confidence,
         "result_origin": result.result_origin,
         "summary_origin": result.summary_origin,
@@ -317,3 +331,23 @@ def combined_summary_origin(results: list[ResearchResult]) -> str:
 
 def tavily_api_key_from_env() -> str | None:
     return os.getenv("TAVILY_API_KEY")
+
+
+def channel_for_source(source: str) -> str:
+    return {
+        "web": "Web",
+        "wikipedia": "Wikipedia",
+        "youtube": "YouTube",
+    }.get(source, source.title())
+
+
+def provider_label(result: ResearchResult) -> str:
+    if result.source == "web" and result.result_origin == "search_api":
+        return "Tavily API"
+    if result.source == "wikipedia" and result.result_origin == "search_api":
+        return "Wikipedia API"
+    if result.source == "youtube" and result.result_origin == "fallback_link":
+        return "YouTube fallback link"
+    if result.result_origin == "fallback_link":
+        return "Fallback link"
+    return "Search API"

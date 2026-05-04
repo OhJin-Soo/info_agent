@@ -175,6 +175,12 @@ textarea {
   text-transform: uppercase;
 }
 
+.badge-channel {
+  background: #f5f5f2;
+  border-color: #d9d7cf;
+  color: #3f4245;
+}
+
 .badge-llm {
   background: #edf4ff;
   border-color: #bad3f7;
@@ -211,10 +217,25 @@ textarea {
   color: var(--accent);
 }
 
-.result-card p {
+.summary-text {
   font-size: 14px;
   line-height: 1.5;
   margin-top: 10px;
+  white-space: pre-wrap;
+}
+
+.more-button {
+  border: 0;
+  color: var(--accent-strong);
+  font-size: 13px;
+  font-weight: 800;
+  margin-top: 8px;
+  min-height: 28px;
+  padding: 0;
+}
+
+.more-button:hover {
+  color: var(--accent);
 }
 
 .meta {

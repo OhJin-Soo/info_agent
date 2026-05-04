@@ -23,9 +23,9 @@ def test_build_queries_returns_deterministic_variants() -> None:
 def test_dedupe_results_keeps_highest_confidence_first() -> None:
     results = dedupe_results(
         [
-            ResearchResult("web", "low", "https://example.com", "...", 0.3),
-            ResearchResult("web", "high", "https://example.com", "...", 0.9),
-            ResearchResult("wiki", "other", "https://example.com/2", "...", 0.8),
+            ResearchResult("web", "Web", "low", "https://example.com", "...", 0.3),
+            ResearchResult("web", "Web", "high", "https://example.com", "...", 0.9),
+            ResearchResult("wikipedia", "Wikipedia", "other", "https://example.com/2", "...", 0.8),
         ]
     )
 
@@ -53,6 +53,7 @@ def test_pipeline_uses_llm_for_plan_and_summary() -> None:
     pipeline.wikipedia.search = lambda query: [
         ResearchResult(
             source="wikipedia",
+            channel="Wikipedia",
             title="Retrieval-augmented generation",
             url="https://example.com/rag",
             summary="raw",
@@ -70,11 +71,16 @@ def test_pipeline_uses_llm_for_plan_and_summary() -> None:
     assert payload["search_origin"] == "search_api"
     assert payload["summary_origin"] == "llm"
     assert payload["pipeline"] == ["text", "llm_keyword_query_extraction", "search_api", "llm_summary"]
-    assert payload["results"][0]["summary"].startswith("summary for Retrieval-augmented")
-    assert payload["results"][0]["result_origin"] == "search_api"
-    assert payload["results"][0]["summary_origin"] == "llm"
-    assert payload["results"][0]["summary_provider"] == "fake"
-    assert "raw_content" not in payload["results"][0]
+    result = next(item for item in payload["results"] if item["url"] == "https://example.com/rag")
+    assert result["summary"].startswith("summary for Retrieval-augmented")
+    assert result["full_summary"].startswith("summary for Retrieval-augmented")
+    assert result["is_truncated"] is False
+    assert result["result_origin"] == "search_api"
+    assert result["channel"] == "Wikipedia"
+    assert result["provider_label"] == "Wikipedia API"
+    assert result["summary_origin"] == "llm"
+    assert result["summary_provider"] == "fake"
+    assert "raw_content" not in result
 
 
 def test_deterministic_llm_matches_fallback_contract() -> None:
@@ -118,3 +124,25 @@ def test_tavily_search_uses_tavily_api_key_env(monkeypatch) -> None:
     search = TavilySearch()
 
     assert search.api_key == "tvly-test"
+
+
+def test_public_result_preserves_full_summary() -> None:
+    pipeline = ResearchPipeline(llm=FakeLLM())
+    pipeline.wikipedia.search = lambda query: [
+        ResearchResult(
+            source="wikipedia",
+            channel="Wikipedia",
+            title="Long result",
+            url="https://example.com/long",
+            summary="raw",
+            confidence=0.8,
+            raw_content="x" * 600,
+        )
+    ]
+
+    payload = pipeline.research("RAG는 벡터 검색을 활용한다.")
+    result = next(item for item in payload["results"] if item["url"] == "https://example.com/long")
+
+    assert result["full_summary"].startswith("summary for Long result")
+    assert len(result["summary"]) <= len(result["full_summary"])
+    assert "full_summary" in result

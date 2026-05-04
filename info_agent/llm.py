@@ -147,7 +147,7 @@ class OpenAIResponsesLLM:
         schema = {
             "type": "object",
             "additionalProperties": False,
-            "properties": {"summary": {"type": "string", "maxLength": 420}},
+            "properties": {"summary": {"type": "string"}},
             "required": ["summary"],
         }
         prompt = (
@@ -164,7 +164,7 @@ class OpenAIResponsesLLM:
             schema_name="source_summary",
             schema=schema,
         )
-        return summarize(str(payload.get("summary", "")) or source_text)
+        return re.sub(r"\s+", " ", str(payload.get("summary", "")) or source_text).strip()
 
     def _request_json(self, *, instructions: str, input_text: str, schema_name: str, schema: dict[str, Any]) -> dict[str, Any]:
         body = {

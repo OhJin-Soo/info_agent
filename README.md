@@ -13,6 +13,7 @@
 - LLM 기반 결과 요약
 - Web/YouTube 검색 링크 fallback
 - LLM/Search API/fallback 응답 출처 표시
+- Web/Tavily, Wikipedia/Wikipedia API, YouTube/fallback link 채널 구분
 - `/research`, `/research/selection` API
 - query context 기반 TTL 캐싱
 

@@ -95,18 +95,31 @@ function renderResearch(payload) {
     card.className = "result-card";
     const resultLabel = originLabel(item.result_origin);
     const summaryLabel = originLabel(item.summary_origin);
+    const fullSummary = item.full_summary || item.summary || "";
+    const preview = item.summary || fullSummary;
+    const needsMore = item.is_truncated && fullSummary !== preview;
     card.innerHTML = `
       <div class="badges">
-        <span class="badge ${badgeClass(item.result_origin)}">Result: ${escapeHtml(resultLabel)}</span>
+        <span class="badge badge-channel">${escapeHtml(item.channel || item.source)}</span>
+        <span class="badge ${badgeClass(item.result_origin)}">${escapeHtml(item.provider_label || resultLabel)}</span>
         <span class="badge ${badgeClass(item.summary_origin)}">Summary: ${escapeHtml(summaryLabel)}</span>
       </div>
       <a href="${escapeAttr(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.title)}</a>
-      <p>${escapeHtml(item.summary || "")}</p>
+      <p class="summary-text" data-preview="${escapeAttr(preview)}" data-full="${escapeAttr(fullSummary)}">${escapeHtml(preview)}</p>
+      ${
+        needsMore
+          ? '<button class="more-button" type="button" aria-expanded="false">더보기</button>'
+          : ""
+      }
       <div class="meta">
         <span>${escapeHtml(item.source)}</span>
         <span>${escapeHtml(item.summary_provider || "")} · ${Math.round((item.confidence || 0) * 100)}%</span>
       </div>
     `;
+    const moreButton = card.querySelector(".more-button");
+    if (moreButton) {
+      moreButton.addEventListener("click", () => toggleSummary(card));
+    }
     results.appendChild(card);
   }
   const provider = payload.llm_provider ? ` · keywords ${originLabel(payload.keyword_origin)} · summary ${originLabel(payload.summary_origin)}` : "";
@@ -148,6 +161,15 @@ function badgeClass(origin) {
     fallback_link: "badge-fallback",
     mixed: "badge-mixed",
   }[origin] || "badge-fallback";
+}
+
+function toggleSummary(card) {
+  const summary = card.querySelector(".summary-text");
+  const button = card.querySelector(".more-button");
+  const expanded = button.getAttribute("aria-expanded") === "true";
+  summary.textContent = expanded ? summary.dataset.preview : summary.dataset.full;
+  button.textContent = expanded ? "더보기" : "접기";
+  button.setAttribute("aria-expanded", String(!expanded));
 }
 
 editor.addEventListener("input", scheduleResearch);
